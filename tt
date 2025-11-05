@@ -1,0 +1,923 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import os
+import csv
+import chardet
+from pathlib import Path
+from datetime import datetime
+import re
+
+class ForensicFileViewer:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("포렌식 파일 뷰어")
+        self.root.geometry("1400x900")
+        
+        # 변수 초기화
+        self.selected_folder = None
+        self.categories = []
+        self.current_category = None
+        self.search_results = []
+        self.current_search_index = 0
+        self.file_tree_data = {}
+        self.current_file_path = None
+        self.current_file_content = None
+        self.view_mode = "table"
+        
+        # 파일 내 검색 관련
+        self.file_search_matches = []
+        self.current_file_search_index = 0
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # 메인 컨테이너
+        main_container = tk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # ===== 상단: 헤더 =====
+        header_frame = tk.Frame(main_container, bg="#2c3e50", height=50)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        title_label = tk.Label(header_frame, text="🔍 포렌식 파일 뷰어", 
+                              bg="#2c3e50", fg="white", font=("맑은 고딕", 14, "bold"))
+        title_label.pack(side=tk.LEFT, padx=20, pady=10)
+        
+        select_btn = tk.Button(header_frame, text="📁 폴더 선택", 
+                              command=self.select_folder,
+                              bg="#3498db", fg="white", font=("맑은 고딕", 10),
+                              relief=tk.FLAT, padx=15, pady=5, cursor="hand2")
+        select_btn.pack(side=tk.RIGHT, padx=20, pady=10)
+        
+        # ===== 카테고리 바 (스크롤 가능) =====
+        category_frame = tk.Frame(main_container, bg="#ecf0f1", height=45)
+        category_frame.pack(fill=tk.X)
+        category_frame.pack_propagate(False)
+        
+        self.category_canvas = tk.Canvas(category_frame, bg="#ecf0f1", 
+                                        highlightthickness=0, height=45)
+        category_scrollbar = tk.Scrollbar(category_frame, orient=tk.HORIZONTAL, 
+                                         command=self.category_canvas.xview)
+        
+        self.category_inner_frame = tk.Frame(self.category_canvas, bg="#ecf0f1")
+        self.category_canvas_window = self.category_canvas.create_window(
+            (0, 0), window=self.category_inner_frame, anchor="nw")
+        
+        self.category_canvas.configure(xscrollcommand=category_scrollbar.set)
+        
+        self.category_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        category_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.category_inner_frame.bind("<Configure>", 
+            lambda e: self.category_canvas.configure(scrollregion=self.category_canvas.bbox("all")))
+        
+        # ===== 전체 검색 바 =====
+        search_frame = tk.Frame(main_container, bg="#f8f9fa", height=45)
+        search_frame.pack(fill=tk.X)
+        search_frame.pack_propagate(False)
+        
+        tk.Label(search_frame, text="전체 검색:", bg="#f8f9fa", 
+                font=("맑은 고딕", 9)).pack(side=tk.LEFT, padx=(20, 5), pady=10)
+        
+        self.search_entry = tk.Entry(search_frame, font=("맑은 고딕", 10), width=40)
+        self.search_entry.pack(side=tk.LEFT, padx=5, pady=10)
+        self.search_entry.bind("<Return>", lambda e: self.search_files())
+        
+        search_btn = tk.Button(search_frame, text="🔍 검색", command=self.search_files,
+                              bg="#28a745", fg="white", font=("맑은 고딕", 9),
+                              relief=tk.FLAT, padx=12, cursor="hand2")
+        search_btn.pack(side=tk.LEFT, padx=5, pady=10)
+        
+        prev_btn = tk.Button(search_frame, text="◀ 이전", command=self.prev_search_result,
+                            bg="#6c757d", fg="white", font=("맑은 고딕", 9),
+                            relief=tk.FLAT, padx=10, cursor="hand2")
+        prev_btn.pack(side=tk.LEFT, padx=2, pady=10)
+        
+        next_btn = tk.Button(search_frame, text="다음 ▶", command=self.next_search_result,
+                            bg="#6c757d", fg="white", font=("맑은 고딕", 9),
+                            relief=tk.FLAT, padx=10, cursor="hand2")
+        next_btn.pack(side=tk.LEFT, padx=2, pady=10)
+        
+        self.search_info_label = tk.Label(search_frame, text="", bg="#f8f9fa", 
+                                         font=("맑은 고딕", 9))
+        self.search_info_label.pack(side=tk.LEFT, padx=10)
+        
+        # ===== PanedWindow로 크기 조절 가능한 레이아웃 =====
+        self.main_paned = tk.PanedWindow(main_container, orient=tk.VERTICAL, 
+                                         sashrelief=tk.RAISED, sashwidth=5)
+        self.main_paned.pack(fill=tk.BOTH, expand=True)
+        
+        top_panel = tk.Frame(self.main_paned)
+        self.main_paned.add(top_panel, minsize=300)
+        
+        self.top_paned = tk.PanedWindow(top_panel, orient=tk.HORIZONTAL, 
+                                       sashrelief=tk.RAISED, sashwidth=5)
+        self.top_paned.pack(fill=tk.BOTH, expand=True)
+        
+        # ===== 좌측: 파일 트리 =====
+        left_frame = tk.Frame(self.top_paned, bg="#f8f9fa")
+        self.top_paned.add(left_frame, minsize=200)
+        
+        tree_label = tk.Label(left_frame, text="📁 폴더/파일 트리", 
+                             bg="#495057", fg="white", font=("맑은 고딕", 10, "bold"),
+                             anchor="w", padx=10, pady=8)
+        tree_label.pack(fill=tk.X)
+        
+        tree_scroll_y = tk.Scrollbar(left_frame, orient=tk.VERTICAL)
+        tree_scroll_x = tk.Scrollbar(left_frame, orient=tk.HORIZONTAL)
+        
+        self.file_tree = ttk.Treeview(left_frame, 
+                                      yscrollcommand=tree_scroll_y.set,
+                                      xscrollcommand=tree_scroll_x.set)
+        tree_scroll_y.config(command=self.file_tree.yview)
+        tree_scroll_x.config(command=self.file_tree.xview)
+        
+        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.file_tree.pack(fill=tk.BOTH, expand=True)
+        
+        self.file_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        
+        # ===== 중앙: 파일 목록 =====
+        center_frame = tk.Frame(self.top_paned)
+        self.top_paned.add(center_frame, minsize=300)
+        
+        self.file_list_header = tk.Label(center_frame, text="📂 파일 목록", 
+                                         bg="#495057", fg="white", 
+                                         font=("맑은 고딕", 10, "bold"),
+                                         anchor="w", padx=10, pady=8)
+        self.file_list_header.pack(fill=tk.X)
+        
+        file_list_scroll_y = tk.Scrollbar(center_frame, orient=tk.VERTICAL)
+        file_list_scroll_x = tk.Scrollbar(center_frame, orient=tk.HORIZONTAL)
+        
+        self.file_listbox = tk.Listbox(center_frame, font=("맑은 고딕", 9),
+                                       yscrollcommand=file_list_scroll_y.set,
+                                       xscrollcommand=file_list_scroll_x.set)
+        file_list_scroll_y.config(command=self.file_listbox.yview)
+        file_list_scroll_x.config(command=self.file_listbox.xview)
+        
+        file_list_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        file_list_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.file_listbox.pack(fill=tk.BOTH, expand=True)
+        
+        self.file_listbox.bind("<<ListboxSelect>>", self.on_file_select)
+        
+        # ===== 하단: 파일 내용 표시 =====
+        bottom_frame = tk.Frame(self.main_paned)
+        self.main_paned.add(bottom_frame, minsize=200)
+        
+        # 내용 헤더
+        content_header = tk.Frame(bottom_frame, bg="#6c757d", height=35)
+        content_header.pack(fill=tk.X)
+        content_header.pack_propagate(False)
+        
+        self.content_title_label = tk.Label(content_header, text="📄 파일 내용", 
+                                           bg="#6c757d", fg="white", 
+                                           font=("맑은 고딕", 9, "bold"))
+        self.content_title_label.pack(side=tk.LEFT, padx=10, pady=8)
+        
+        # 보기 모드 버튼
+        view_mode_frame = tk.Frame(content_header, bg="#6c757d")
+        view_mode_frame.pack(side=tk.RIGHT, padx=10)
+        
+        self.table_btn = tk.Button(view_mode_frame, text="표", 
+                                   command=lambda: self.change_view_mode("table"),
+                                   bg="#495057", fg="white", font=("맑은 고딕", 8),
+                                   relief=tk.FLAT, padx=8, cursor="hand2")
+        self.table_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.text_btn = tk.Button(view_mode_frame, text="텍스트", 
+                                 command=lambda: self.change_view_mode("text"),
+                                 bg="#343a40", fg="white", font=("맑은 고딕", 8),
+                                 relief=tk.FLAT, padx=8, cursor="hand2")
+        self.text_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.hex_btn = tk.Button(view_mode_frame, text="HEX", 
+                                command=lambda: self.change_view_mode("hex"),
+                                bg="#343a40", fg="white", font=("맑은 고딕", 8),
+                                relief=tk.FLAT, padx=8, cursor="hand2")
+        self.hex_btn.pack(side=tk.LEFT, padx=2)
+        
+        # ===== 파일 내 검색 바 =====
+        file_search_frame = tk.Frame(bottom_frame, bg="#e9ecef", height=40)
+        file_search_frame.pack(fill=tk.X)
+        file_search_frame.pack_propagate(False)
+        
+        tk.Label(file_search_frame, text="파일 내 검색:", bg="#e9ecef", 
+                font=("맑은 고딕", 9)).pack(side=tk.LEFT, padx=(10, 5), pady=8)
+        
+        self.file_search_entry = tk.Entry(file_search_frame, font=("맑은 고딕", 9), width=30)
+        self.file_search_entry.pack(side=tk.LEFT, padx=5, pady=8)
+        self.file_search_entry.bind("<Return>", lambda e: self.search_in_file())
+        
+        file_search_btn = tk.Button(file_search_frame, text="찾기", command=self.search_in_file,
+                                    bg="#17a2b8", fg="white", font=("맑은 고딕", 8),
+                                    relief=tk.FLAT, padx=10, cursor="hand2")
+        file_search_btn.pack(side=tk.LEFT, padx=5, pady=8)
+        
+        file_prev_btn = tk.Button(file_search_frame, text="◀", command=self.prev_file_search,
+                                 bg="#6c757d", fg="white", font=("맑은 고딕", 8),
+                                 relief=tk.FLAT, padx=8, cursor="hand2")
+        file_prev_btn.pack(side=tk.LEFT, padx=2, pady=8)
+        
+        file_next_btn = tk.Button(file_search_frame, text="▶", command=self.next_file_search,
+                                 bg="#6c757d", fg="white", font=("맑은 고딕", 8),
+                                 relief=tk.FLAT, padx=8, cursor="hand2")
+        file_next_btn.pack(side=tk.LEFT, padx=2, pady=8)
+        
+        self.file_search_info = tk.Label(file_search_frame, text="", bg="#e9ecef", 
+                                        font=("맑은 고딕", 9))
+        self.file_search_info.pack(side=tk.LEFT, padx=10)
+        
+        # 내용 표시 영역
+        content_container = tk.Frame(bottom_frame)
+        content_container.pack(fill=tk.BOTH, expand=True)
+        
+        # 테이블 뷰 (CSV용)
+        self.table_frame = tk.Frame(content_container)
+        
+        table_scroll_y = tk.Scrollbar(self.table_frame, orient=tk.VERTICAL)
+        table_scroll_x = tk.Scrollbar(self.table_frame, orient=tk.HORIZONTAL)
+        
+        self.content_tree = ttk.Treeview(self.table_frame, 
+                                        yscrollcommand=table_scroll_y.set,
+                                        xscrollcommand=table_scroll_x.set)
+        table_scroll_y.config(command=self.content_tree.yview)
+        table_scroll_x.config(command=self.content_tree.xview)
+        
+        table_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        table_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.content_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # 하이라이트 태그 설정
+        self.content_tree.tag_configure("highlight", background="yellow", foreground="black")
+        
+        # 텍스트 뷰 (TXT/HEX용)
+        self.text_frame = tk.Frame(content_container)
+        
+        text_scroll_y = tk.Scrollbar(self.text_frame, orient=tk.VERTICAL)
+        text_scroll_x = tk.Scrollbar(self.text_frame, orient=tk.HORIZONTAL)
+        
+        self.content_text = tk.Text(self.text_frame, wrap=tk.NONE,
+                                   font=("Consolas", 9),
+                                   yscrollcommand=text_scroll_y.set,
+                                   xscrollcommand=text_scroll_x.set)
+        text_scroll_y.config(command=self.content_text.yview)
+        text_scroll_x.config(command=self.content_text.xview)
+        
+        text_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        text_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.content_text.pack(fill=tk.BOTH, expand=True)
+        
+        # 하이라이트 태그 설정
+        self.content_text.tag_configure("highlight", background="yellow", foreground="black")
+        
+        # 초기 뷰 설정
+        self.table_frame.pack(fill=tk.BOTH, expand=True)
+        
+    def select_folder(self):
+        folder = filedialog.askdirectory(title="폴더 선택")
+        if folder:
+            self.selected_folder = folder
+            self.load_categories()
+            
+    def load_categories(self):
+        """선택된 폴더의 최상위 하위 폴더들을 카테고리로 로드"""
+        if not self.selected_folder:
+            return
+            
+        for widget in self.category_inner_frame.winfo_children():
+            widget.destroy()
+            
+        self.categories = []
+        
+        try:
+            items = os.listdir(self.selected_folder)
+            for item in items:
+                item_path = os.path.join(self.selected_folder, item)
+                if os.path.isdir(item_path):
+                    self.categories.append(item)
+                    
+            for idx, category in enumerate(self.categories):
+                btn = tk.Button(self.category_inner_frame, text=f"📂 {category}",
+                              command=lambda c=category: self.select_category(c),
+                              bg="white", font=("맑은 고딕", 9),
+                              relief=tk.RAISED, padx=15, pady=8, cursor="hand2")
+                btn.pack(side=tk.LEFT, padx=3, pady=5)
+                
+            if self.categories:
+                self.select_category(self.categories[0])
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"폴더 로드 실패: {str(e)}")
+            
+    def select_category(self, category):
+        """카테고리 선택 시 좌측 트리에 해당 폴더 구조 표시"""
+        self.current_category = category
+        
+        for widget in self.category_inner_frame.winfo_children():
+            if isinstance(widget, tk.Button):
+                if category in widget["text"]:
+                    widget.config(bg="#2980b9", fg="white")
+                else:
+                    widget.config(bg="white", fg="black")
+                    
+        self.file_tree.delete(*self.file_tree.get_children())
+        category_path = os.path.join(self.selected_folder, category)
+        
+        self.populate_tree("", category_path)
+        
+    def populate_tree(self, parent, path):
+        """재귀적으로 트리 구조 생성"""
+        try:
+            items = os.listdir(path)
+            items.sort()
+            
+            for item in items:
+                item_path = os.path.join(path, item)
+                is_dir = os.path.isdir(item_path)
+                
+                icon = "📁" if is_dir else "📄"
+                node = self.file_tree.insert(parent, "end", text=f"{icon} {item}", 
+                                             values=(item_path,))
+                
+                if is_dir:
+                    try:
+                        if os.listdir(item_path):
+                            self.populate_tree(node, item_path)
+                    except:
+                        pass
+                        
+        except Exception as e:
+            print(f"트리 로드 오류: {str(e)}")
+            
+    def on_tree_select(self, event):
+        """트리에서 항목 선택 시"""
+        selection = self.file_tree.selection()
+        if not selection:
+            return
+            
+        item = selection[0]
+        values = self.file_tree.item(item, "values")
+        
+        if values:
+            path = values[0]
+            if os.path.isdir(path):
+                self.load_file_list(path)
+            else:
+                self.display_file(path)
+                
+    def load_file_list(self, folder_path):
+        """중앙 영역에 선택된 폴더의 파일 목록 표시"""
+        self.file_listbox.delete(0, tk.END)
+        
+        folder_name = os.path.basename(folder_path)
+        
+        try:
+            items = os.listdir(folder_path)
+            files = [f for f in items if os.path.isfile(os.path.join(folder_path, f))]
+            files.sort()
+            
+            self.file_list_header.config(text=f"📂 {folder_name} ({len(files)}개 파일)")
+            
+            for file in files:
+                file_path = os.path.join(folder_path, file)
+                size = os.path.getsize(file_path)
+                size_str = self.format_size(size)
+                
+                self.file_listbox.insert(tk.END, f"📄 {file}  ({size_str})")
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"파일 목록 로드 실패: {str(e)}")
+            
+    def format_size(self, size):
+        """파일 크기 포맷"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+        
+    def on_file_select(self, event):
+        """파일 목록에서 파일 선택 시"""
+        selection = self.file_listbox.curselection()
+        if not selection:
+            return
+            
+        idx = selection[0]
+        file_text = self.file_listbox.get(idx)
+        
+        file_name = file_text.split("📄 ")[1].split("  (")[0]
+        
+        tree_selection = self.file_tree.selection()
+        if tree_selection:
+            values = self.file_tree.item(tree_selection[0], "values")
+            if values:
+                parent_path = values[0]
+                if os.path.isdir(parent_path):
+                    file_path = os.path.join(parent_path, file_name)
+                else:
+                    file_path = os.path.join(os.path.dirname(parent_path), file_name)
+                    
+                self.display_file(file_path)
+                
+    def display_file(self, file_path):
+        """하단 영역에 파일 내용 표시"""
+        self.current_file_path = file_path
+        file_name = os.path.basename(file_path)
+        self.content_title_label.config(text=f"📄 {file_name}")
+        
+        # 파일 내 검색 초기화
+        self.file_search_matches = []
+        self.current_file_search_index = 0
+        self.file_search_info.config(text="")
+        
+        try:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext == '.csv':
+                self.view_mode = "table"
+                self.display_csv(file_path)
+            else:
+                self.view_mode = "text"
+                self.display_text(file_path)
+                
+            self.update_view_buttons()
+            
+        except Exception as e:
+            messagebox.showerror("오류", f"파일 표시 실패: {str(e)}")
+            
+    def display_csv(self, file_path):
+        """CSV 파일을 테이블로 표시"""
+        self.text_frame.pack_forget()
+        self.table_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.content_tree.delete(*self.content_tree.get_children())
+        
+        encoding = self.detect_encoding(file_path)
+        
+        try:
+            with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+                
+            if not rows:
+                return
+                
+            headers = [h.strip() for h in rows[0]]
+            self.content_tree["columns"] = headers
+            self.content_tree["show"] = "tree headings"
+            
+            self.content_tree.column("#0", width=50, stretch=False)
+            self.content_tree.heading("#0", text="No")
+            
+            for col in headers:
+                self.content_tree.column(col, width=150, anchor="w")
+                self.content_tree.heading(col, text=col)
+                
+            for idx, row in enumerate(rows[1:], 1):
+                row_data = row + [""] * (len(headers) - len(row))
+                row_data = row_data[:len(headers)]
+                self.content_tree.insert("", "end", text=str(idx), values=row_data)
+                
+            self.current_file_content = rows
+            
+        except Exception as e:
+            messagebox.showerror("오류", f"CSV 로드 실패: {str(e)}")
+            
+    def display_text(self, file_path):
+        """텍스트 파일 표시"""
+        self.table_frame.pack_forget()
+        self.text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.content_text.delete(1.0, tk.END)
+        
+        encoding = self.detect_encoding(file_path)
+        
+        try:
+            file_size = os.path.getsize(file_path)
+            max_size = 10 * 1024 * 1024
+            
+            if file_size > max_size:
+                with open(file_path, 'rb') as f:
+                    content = f.read(max_size)
+                    
+                try:
+                    text = content.decode(encoding, errors='ignore')
+                    text += f"\n\n[파일이 너무 큽니다. 처음 10MB만 표시됩니다.]"
+                except:
+                    text = self.to_hex(content)
+                    text += f"\n\n[파일이 너무 큽니다. 처음 10MB만 표시됩니다.]"
+            else:
+                with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
+                    text = f.read()
+                    
+            self.content_text.insert(1.0, text)
+            self.current_file_content = text
+            
+        except Exception as e:
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read(max_size if file_size > max_size else file_size)
+                    
+                hex_text = self.to_hex(content)
+                if file_size > max_size:
+                    hex_text += f"\n\n[파일이 너무 큽니다. 처음 10MB만 표시됩니다.]"
+                    
+                self.content_text.insert(1.0, hex_text)
+                self.current_file_content = hex_text
+                self.view_mode = "hex"
+                self.update_view_buttons()
+                
+            except Exception as e2:
+                messagebox.showerror("오류", f"파일 표시 실패: {str(e2)}")
+                
+    def to_hex(self, data):
+        """바이트 데이터를 HEX 문자열로 변환"""
+        hex_lines = []
+        for i in range(0, len(data), 16):
+            chunk = data[i:i+16]
+            hex_part = ' '.join(f'{b:02X}' for b in chunk)
+            ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+            hex_lines.append(f"{i:08X}  {hex_part:<48}  {ascii_part}")
+        return '\n'.join(hex_lines)
+        
+    def detect_encoding(self, file_path):
+        """파일 인코딩 감지"""
+        try:
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(10000)
+                result = chardet.detect(raw_data)
+                return result['encoding'] or 'utf-8'
+        except:
+            return 'utf-8'
+            
+    def change_view_mode(self, mode):
+        """뷰 모드 변경"""
+        if not self.current_file_path:
+            return
+            
+        self.view_mode = mode
+        
+        if mode == "table":
+            if self.current_file_path.endswith('.csv'):
+                self.display_csv(self.current_file_path)
+            else:
+                messagebox.showinfo("알림", "CSV 파일만 표 형식으로 볼 수 있습니다.")
+                return
+        elif mode == "text":
+            self.display_text(self.current_file_path)
+        elif mode == "hex":
+            self.display_hex_view()
+            
+        self.update_view_buttons()
+        
+    def display_hex_view(self):
+        """HEX 뷰 표시"""
+        self.table_frame.pack_forget()
+        self.text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.content_text.delete(1.0, tk.END)
+        
+        try:
+            max_size = 10 * 1024 * 1024
+            file_size = os.path.getsize(self.current_file_path)
+            
+            with open(self.current_file_path, 'rb') as f:
+                content = f.read(max_size if file_size > max_size else file_size)
+                
+            hex_text = self.to_hex(content)
+            if file_size > max_size:
+                hex_text += f"\n\n[파일이 너무 큽니다. 처음 10MB만 표시됩니다.]"
+                
+            self.content_text.insert(1.0, hex_text)
+            
+        except Exception as e:
+            messagebox.showerror("오류", f"HEX 뷰 표시 실패: {str(e)}")
+            
+    def update_view_buttons(self):
+        """뷰 모드 버튼 업데이트"""
+        self.table_btn.config(bg="#343a40" if self.view_mode != "table" else "#495057")
+        self.text_btn.config(bg="#343a40" if self.view_mode != "text" else "#495057")
+        self.hex_btn.config(bg="#343a40" if self.view_mode != "hex" else "#495057")
+        
+    # ===== 전체 파일 검색 =====
+    def search_files(self):
+        """전체 파일에서 검색"""
+        search_text = self.search_entry.get().strip()
+        if not search_text:
+            messagebox.showwarning("경고", "검색어를 입력하세요.")
+            return
+            
+        if not self.selected_folder:
+            messagebox.showwarning("경고", "먼저 폴더를 선택하세요.")
+            return
+            
+        self.search_results = []
+        self.current_search_index = 0
+        
+        self.search_info_label.config(text="검색 중...")
+        self.root.update()
+        
+        # 정규식 패턴 생성 (대소문자 무시)
+        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+        
+        # 모든 파일 검색
+        for root_dir, dirs, files in os.walk(self.selected_folder):
+            for file in files:
+                file_path = os.path.join(root_dir, file)
+                
+                try:
+                    # 파일 크기 확인
+                    if os.path.getsize(file_path) > 50 * 1024 * 1024:
+                        continue
+                    
+                    # 바이너리로 읽어서 검색 (인코딩 문제 회피)
+                    with open(file_path, 'rb') as f:
+                        content = f.read()
+                    
+                    # 텍스트로 변환 시도
+                    try:
+                        encoding = self.detect_encoding(file_path)
+                        text_content = content.decode(encoding, errors='ignore')
+                    except:
+                        # 디코딩 실패 시 latin1로 시도
+                        text_content = content.decode('latin1', errors='ignore')
+                    
+                    # 검색어 포함 여부 확인
+                    if pattern.search(text_content):
+                        self.search_results.append({
+                            'path': file_path,
+                            'content': text_content
+                        })
+                        
+                except Exception as e:
+                    continue
+                    
+        # 검색 결과 표시
+        if self.search_results:
+            self.search_info_label.config(
+                text=f"검색 결과: {len(self.search_results)}개 파일 (1/{len(self.search_results)})")
+            
+            self.add_search_category()
+            self.show_search_result(0)
+            
+            messagebox.showinfo("검색 완료", f"{len(self.search_results)}개 파일에서 '{search_text}'를 찾았습니다.")
+        else:
+            self.search_info_label.config(text="검색 결과 없음")
+            messagebox.showinfo("검색 완료", "검색 결과가 없습니다.")
+            
+    def add_search_category(self):
+        """검색 결과 카테고리 추가"""
+        # 기존 검색 카테고리 제거
+        for widget in self.category_inner_frame.winfo_children():
+            if isinstance(widget, tk.Button) and "🔍 검색 결과" in widget["text"]:
+                widget.destroy()
+                
+        # 새 검색 카테고리 추가
+        search_btn = tk.Button(self.category_inner_frame, text="🔍 검색 결과",
+                              command=self.show_search_results_tree,
+                              bg="#f39c12", fg="white", font=("맑은 고딕", 9),
+                              relief=tk.RAISED, padx=15, pady=8, cursor="hand2")
+        search_btn.pack(side=tk.LEFT, padx=3, pady=5)
+        
+    def show_search_results_tree(self):
+        """검색 결과를 트리에 표시"""
+        self.file_tree.delete(*self.file_tree.get_children())
+        
+        for idx, result in enumerate(self.search_results, 1):
+            file_name = os.path.basename(result['path'])
+            rel_path = os.path.relpath(result['path'], self.selected_folder)
+            self.file_tree.insert("", "end", text=f"📄 {rel_path}", 
+                                 values=(result['path'],))
+                                 
+        # 카테고리 버튼 활성화 표시
+        for widget in self.category_inner_frame.winfo_children():
+            if isinstance(widget, tk.Button):
+                if "🔍 검색 결과" in widget["text"]:
+                    widget.config(bg="#f39c12", fg="white")
+                else:
+                    widget.config(bg="white", fg="black")
+                    
+    def show_search_result(self, index):
+        """특정 검색 결과 표시 및 하이라이트"""
+        if not self.search_results or index < 0 or index >= len(self.search_results):
+            return
+            
+        result = self.search_results[index]
+        self.display_file(result['path'])
+        
+        # 검색어 하이라이트
+        search_text = self.search_entry.get().strip()
+        self.highlight_search_text(search_text)
+        
+        # 인덱스 업데이트
+        self.current_search_index = index
+        self.search_info_label.config(
+            text=f"검색 결과: {len(self.search_results)}개 파일 "
+                 f"({index + 1}/{len(self.search_results)})")
+        
+    def highlight_search_text(self, search_text):
+        """텍스트에서 검색어 하이라이트"""
+        if not search_text:
+            return
+            
+        if self.view_mode == "table":
+            # CSV 테이블에서 하이라이트
+            self.highlight_in_table(search_text)
+        else:
+            # 텍스트/HEX 뷰에서 하이라이트
+            self.highlight_in_text(search_text)
+                
+    def highlight_in_table(self, search_text):
+        """테이블에서 검색어 하이라이트"""
+        # 모든 태그 제거
+        for item in self.content_tree.get_children():
+            self.content_tree.item(item, tags=())
+        
+        # 검색어를 포함한 행 하이라이트
+        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+        
+        for item in self.content_tree.get_children():
+            values = self.content_tree.item(item, "values")
+            row_text = " ".join(str(v) for v in values)
+            
+            if pattern.search(row_text):
+                self.content_tree.item(item, tags=("highlight",))
+    
+    def highlight_in_text(self, search_text):
+        """텍스트 위젯에서 검색어 하이라이트"""
+        # 기존 하이라이트 제거
+        self.content_text.tag_remove("highlight", "1.0", tk.END)
+        
+        # 검색어 찾아서 하이라이트
+        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+        content = self.content_text.get("1.0", tk.END)
+        
+        for match in pattern.finditer(content):
+            start_idx = match.start()
+            end_idx = match.end()
+            
+            # 인덱스를 Text 위젯 형식으로 변환
+            start_pos = f"1.0+{start_idx}c"
+            end_pos = f"1.0+{end_idx}c"
+            
+            self.content_text.tag_add("highlight", start_pos, end_pos)
+        
+        # 첫 번째 결과로 스크롤
+        first_match = pattern.search(content)
+        if first_match:
+            first_pos = f"1.0+{first_match.start()}c"
+            self.content_text.see(first_pos)
+                
+    def prev_search_result(self):
+        """이전 검색 결과로 이동"""
+        if not self.search_results:
+            return
+            
+        self.current_search_index = (self.current_search_index - 1) % len(self.search_results)
+        self.show_search_result(self.current_search_index)
+                 
+    def next_search_result(self):
+        """다음 검색 결과로 이동"""
+        if not self.search_results:
+            return
+            
+        self.current_search_index = (self.current_search_index + 1) % len(self.search_results)
+        self.show_search_result(self.current_search_index)
+    
+    # ===== 파일 내 검색 =====
+    def search_in_file(self):
+        """현재 열린 파일 내에서 검색"""
+        search_text = self.file_search_entry.get().strip()
+        if not search_text:
+            messagebox.showwarning("경고", "검색어를 입력하세요.")
+            return
+            
+        if not self.current_file_path:
+            messagebox.showwarning("경고", "먼저 파일을 선택하세요.")
+            return
+        
+        self.file_search_matches = []
+        self.current_file_search_index = 0
+        
+        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+        
+        if self.view_mode == "table":
+            # CSV 테이블에서 검색
+            self.search_in_table(pattern, search_text)
+        else:
+            # 텍스트/HEX 뷰에서 검색
+            self.search_in_text_widget(pattern, search_text)
+    
+    def search_in_table(self, pattern, search_text):
+        """테이블에서 검색"""
+        # 모든 태그 제거
+        for item in self.content_tree.get_children():
+            self.content_tree.item(item, tags=())
+        
+        # 검색어를 포함한 행 찾기
+        for item in self.content_tree.get_children():
+            values = self.content_tree.item(item, "values")
+            row_text = " ".join(str(v) for v in values)
+            
+            if pattern.search(row_text):
+                self.content_tree.item(item, tags=("highlight",))
+                self.file_search_matches.append(item)
+        
+        # 결과 표시
+        match_count = len(self.file_search_matches)
+        if match_count > 0:
+            self.file_search_info.config(text=f"결과: {match_count}개 (1/{match_count})")
+            # 첫 번째 결과로 이동
+            first_item = self.file_search_matches[0]
+            self.content_tree.selection_set(first_item)
+            self.content_tree.see(first_item)
+            self.current_file_search_index = 0
+        else:
+            self.file_search_info.config(text="결과 없음")
+            messagebox.showinfo("검색", "검색 결과가 없습니다.")
+    
+    def search_in_text_widget(self, pattern, search_text):
+        """텍스트 위젯에서 검색"""
+        # 기존 하이라이트 제거
+        self.content_text.tag_remove("highlight", "1.0", tk.END)
+        self.file_search_matches = []
+        
+        # 검색어 찾아서 하이라이트
+        content = self.content_text.get("1.0", tk.END)
+        
+        for match in pattern.finditer(content):
+            start_idx = match.start()
+            end_idx = match.end()
+            
+            start_pos = f"1.0+{start_idx}c"
+            end_pos = f"1.0+{end_idx}c"
+            
+            self.content_text.tag_add("highlight", start_pos, end_pos)
+            self.file_search_matches.append(start_pos)
+        
+        # 결과 표시
+        match_count = len(self.file_search_matches)
+        if match_count > 0:
+            self.file_search_info.config(text=f"결과: {match_count}개 (1/{match_count})")
+            # 첫 번째 결과로 스크롤
+            self.content_text.see(self.file_search_matches[0])
+            self.current_file_search_index = 0
+        else:
+            self.file_search_info.config(text="결과 없음")
+            messagebox.showinfo("검색", "검색 결과가 없습니다.")
+    
+    def prev_file_search(self):
+        """파일 내 이전 검색 결과로 이동"""
+        if not self.file_search_matches:
+            return
+        
+        self.current_file_search_index = (self.current_file_search_index - 1) % len(self.file_search_matches)
+        
+        if self.view_mode == "table":
+            # 테이블에서 이동
+            item = self.file_search_matches[self.current_file_search_index]
+            self.content_tree.selection_set(item)
+            self.content_tree.see(item)
+        else:
+            # 텍스트에서 이동
+            pos = self.file_search_matches[self.current_file_search_index]
+            self.content_text.see(pos)
+        
+        self.file_search_info.config(
+            text=f"결과: {len(self.file_search_matches)}개 "
+                 f"({self.current_file_search_index + 1}/{len(self.file_search_matches)})")
+    
+    def next_file_search(self):
+        """파일 내 다음 검색 결과로 이동"""
+        if not self.file_search_matches:
+            return
+        
+        self.current_file_search_index = (self.current_file_search_index + 1) % len(self.file_search_matches)
+        
+        if self.view_mode == "table":
+            # 테이블에서 이동
+            item = self.file_search_matches[self.current_file_search_index]
+            self.content_tree.selection_set(item)
+            self.content_tree.see(item)
+        else:
+            # 텍스트에서 이동
+            pos = self.file_search_matches[self.current_file_search_index]
+            self.content_text.see(pos)
+        
+        self.file_search_info.config(
+            text=f"결과: {len(self.file_search_matches)}개 "
+                 f"({self.current_file_search_index + 1}/{len(self.file_search_matches)})")
+
+
+def main():
+    root = tk.Tk()
+    app = ForensicFileViewer(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
